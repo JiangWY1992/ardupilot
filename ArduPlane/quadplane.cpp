@@ -484,6 +484,18 @@ const AP_Param::GroupInfo QuadPlane::var_info2[] = {
     // @User: Standard
     AP_GROUPINFO("TAILSIT_GSCMIN", 18, QuadPlane, tailsitter.gain_scaling_min, 0.4),
 
+    // @Param: QLH_VMAX_UP
+    // @DisplayName: Tailsitter maximum upward speed for QLOITER and QHOVER
+    // @Description: Tailsitter maximum vertical speed for QLOITER and QHOVER, should be positive
+    // @User: jwy
+    AP_GROUPINFO("QLH_VMAX_UP", 19, QuadPlane, qlh_velocity_up_max_cms, 500),
+
+    // @Param: QLH_VMAX_DN
+    // @DisplayName: Tailsitter minimum downward speed for QLOITER and QHOVER, should be positive
+    // @Description: Bitmask of gain scaling methods to be applied: BOOST: boost gain at low throttle, ATT_THR: reduce gain at high throttle/tilt, INTERP: interpolate between fixed-wing and copter controls
+    // @User: jwy
+    AP_GROUPINFO("QLH_VMAX_DN", 20, QuadPlane, qlh_velocity_dn_max_cms, 50),
+
     AP_GROUPEND
 };
 
@@ -942,8 +954,13 @@ void QuadPlane::run_z_controller(void)
         pos_control->set_desired_velocity_z(inertial_nav.get_velocity_z());
 
         // initialize vertical speeds and leash lengths
-        pos_control->set_max_speed_z(-pilot_velocity_z_max, pilot_velocity_z_max);
-        pos_control->set_max_accel_z(pilot_accel_z);
+        if (plane.control_mode == &plane.mode_qhover || plane.control_mode == &plane.mode_qloiter){
+            pos_control->set_max_speed_z(-qlh_velocity_dn_max_cms, qlh_velocity_up_max_cms);
+            pos_control->set_max_accel_z(pilot_accel_z);
+        } else {
+            pos_control->set_max_speed_z(-pilot_velocity_z_max, pilot_velocity_z_max);
+            pos_control->set_max_accel_z(pilot_accel_z);
+        }
         
         // it has been two seconds since we last ran the Z
         // controller. We need to assume the integrator may be way off
@@ -988,7 +1005,7 @@ void QuadPlane::init_qacro(void)
 void QuadPlane::init_hover(void)
 {
     // initialize vertical speeds and leash lengths
-    pos_control->set_max_speed_z(-pilot_velocity_z_max, pilot_velocity_z_max);
+    pos_control->set_max_speed_z(-qlh_velocity_dn_max_cms, qlh_velocity_up_max_cms);
     pos_control->set_max_accel_z(pilot_accel_z);
 
     // initialise position and desired velocity
@@ -1024,7 +1041,7 @@ void QuadPlane::hold_hover(float target_climb_rate)
     motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
     // initialize vertical speeds and acceleration
-    pos_control->set_max_speed_z(-pilot_velocity_z_max, pilot_velocity_z_max);
+    pos_control->set_max_speed_z(-qlh_velocity_dn_max_cms, qlh_velocity_up_max_cms);
     pos_control->set_max_accel_z(pilot_accel_z);
 
     // call attitude controller
@@ -1107,7 +1124,7 @@ void QuadPlane::control_hover(void)
         attitude_control->relax_attitude_controllers();
         pos_control->relax_alt_hold_controllers(0);
     } else {
-        hold_hover(get_pilot_desired_climb_rate_cms());
+        hold_hover(get_pilot_desired_climb_rate_qlh_cms());
     }
 }
 
@@ -1118,7 +1135,7 @@ void QuadPlane::init_loiter(void)
     loiter_nav->init_target();
 
     // initialize vertical speed and acceleration
-    pos_control->set_max_speed_z(-pilot_velocity_z_max, pilot_velocity_z_max);
+    pos_control->set_max_speed_z(-qlh_velocity_dn_max_cms, qlh_velocity_up_max_cms);
     pos_control->set_max_accel_z(pilot_accel_z);
 
     // initialise position and desired velocity
@@ -1261,7 +1278,7 @@ void QuadPlane::control_loiter()
     motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
     // initialize vertical speed and acceleration
-    pos_control->set_max_speed_z(-pilot_velocity_z_max, pilot_velocity_z_max);
+    pos_control->set_max_speed_z(-qlh_velocity_dn_max_cms, qlh_velocity_up_max_cms);
     pos_control->set_max_accel_z(pilot_accel_z);
 
     // process pilot's roll and pitch input
@@ -1307,6 +1324,9 @@ void QuadPlane::control_loiter()
         check_land_complete();
     } else if (plane.control_mode == &plane.mode_guided && guided_takeoff) {
         pos_control->set_alt_target_from_climb_rate_ff(0, plane.G_Dt, false);
+    } else if (plane.control_mode == &plane.mode_qhover || plane.control_mode == &plane.mode_qloiter) {
+        // update altitude target and call position controller
+        pos_control->set_alt_target_from_climb_rate_ff(get_pilot_desired_climb_rate_qlh_cms(), plane.G_Dt, false);
     } else {
         // update altitude target and call position controller
         pos_control->set_alt_target_from_climb_rate_ff(get_pilot_desired_climb_rate_cms(), plane.G_Dt, false);
@@ -1376,6 +1396,25 @@ float QuadPlane::get_pilot_desired_climb_rate_cms(void) const
     uint16_t dead_zone = plane.channel_throttle->get_dead_zone();
     uint16_t trim = (plane.channel_throttle->get_radio_max() + plane.channel_throttle->get_radio_min())/2;
     return pilot_velocity_z_max * plane.channel_throttle->pwm_to_angle_dz_trim(dead_zone, trim) / 100.0f;
+}
+
+// get pilot desired climb rate in cm/s for QLoiter and QHover
+float QuadPlane::get_pilot_desired_climb_rate_qlh_cms(void) const
+{
+    if (plane.failsafe.rc_failsafe || plane.failsafe.throttle_counter > 0) {
+        // descend at 0.5m/s for now
+        return -50;
+    }
+    uint16_t dead_zone = plane.channel_throttle->get_dead_zone();
+    uint16_t trim = (plane.channel_throttle->get_radio_max() + plane.channel_throttle->get_radio_min())/2;
+    float desired_climb_rate;
+    float pilot_trimed_throttled = plane.channel_throttle->pwm_to_angle_dz_trim(dead_zone, trim) / 100.0f;
+    if (pilot_trimed_throttled > 0){
+        desired_climb_rate = qlh_velocity_up_max_cms * pilot_trimed_throttled;
+    } else {
+        desired_climb_rate = qlh_velocity_dn_max_cms * pilot_trimed_throttled;
+    }
+    return desired_climb_rate;
 }
 
 

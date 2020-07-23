@@ -185,6 +185,12 @@ private:
     // maximum vertical velocity the pilot may request
     AP_Int16 pilot_velocity_z_max;
 
+    //Tailsitter maximum upward speed for QLOITER and QHOVER
+    AP_Int16 qlh_velocity_up_max_cms;
+
+    //Tailsitter maximum downward speed for QLOITER and QHOVER
+    AP_Int16 qlh_velocity_dn_max_cms;
+
     // vertical acceleration the pilot may request
     AP_Int16 pilot_accel_z;
 
@@ -209,6 +215,9 @@ private:
     // get pilot desired yaw rate in cd/s
     float get_pilot_input_yaw_rate_cds(void) const;
 
+    // get desired climb rate in cm/s for QLoiter and QHover
+    float get_pilot_desired_climb_rate_qlh_cms(void) const;
+    
     // get overall desired yaw rate in cd/s
     float get_desired_yaw_rate_cds(void);
     
