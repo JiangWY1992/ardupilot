@@ -63,14 +63,10 @@ bool AP_Arming_Sub::ins_checks(bool display_failure)
     }
 
     // additional sub-specific checks
-    if ((checks_to_perform & ARMING_CHECK_ALL) ||
-        (checks_to_perform & ARMING_CHECK_INS)) {
-        if (!AP::ahrs().prearm_healthy()) {
-            const char *reason = AP::ahrs().prearm_failure_reason();
-            if (reason == nullptr) {
-                reason = "AHRS not healthy";
-            }
-            check_failed(ARMING_CHECK_INS, display_failure, "%s", reason);
+    if (check_enabled(ARMING_CHECK_INS)) {
+        char failure_msg[50] = {};
+        if (!AP::ahrs().pre_arm_check(false, failure_msg, sizeof(failure_msg))) {
+            check_failed(ARMING_CHECK_INS, display_failure, "AHRS: %s", failure_msg);
             return false;
         }
     }
@@ -95,8 +91,10 @@ bool AP_Arming_Sub::arm(AP_Arming::Method method, bool do_arming_checks)
         return false;
     }
 
+#if HAL_LOGGING_ENABLED
     // let logger know that we're armed (it may open logs e.g.)
     AP::logger().set_vehicle_armed(true);
+#endif
 
     // disable cpu failsafe because initialising everything takes a while
     sub.mainloop_failsafe_disable();
@@ -109,7 +107,7 @@ bool AP_Arming_Sub::arm(AP_Arming::Method method, bool do_arming_checks)
     }
 
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-    gcs().send_text(MAV_SEVERITY_INFO, "Arming motors");
+    send_arm_disarm_statustext("Arming motors");
 #endif
 
     AP_AHRS &ahrs = AP::ahrs();
@@ -129,8 +127,6 @@ bool AP_Arming_Sub::arm(AP_Arming::Method method, bool do_arming_checks)
         }
     }
 
-    // enable gps velocity based centrefugal force compensation
-    ahrs.set_correct_centrifugal(true);
     hal.util->set_soft_armed(true);
 
     // enable output to motors
@@ -139,8 +135,10 @@ bool AP_Arming_Sub::arm(AP_Arming::Method method, bool do_arming_checks)
     // finally actually arm the motors
     sub.motors.armed(true);
 
+#if HAL_LOGGING_ENABLED
     // log flight mode in case it was changed while vehicle was disarmed
-    AP::logger().Write_Mode(sub.control_mode, sub.control_mode_reason);
+    AP::logger().Write_Mode((uint8_t)sub.control_mode, sub.control_mode_reason);
+#endif
 
     // reenable failsafe
     sub.mainloop_failsafe_enable();
@@ -155,22 +153,22 @@ bool AP_Arming_Sub::arm(AP_Arming::Method method, bool do_arming_checks)
     return true;
 }
 
-bool AP_Arming_Sub::disarm(const AP_Arming::Method method)
+bool AP_Arming_Sub::disarm(const AP_Arming::Method method, bool do_disarm_checks)
 {
     // return immediately if we are already disarmed
     if (!sub.motors.armed()) {
         return false;
     }
 
-    if (!AP_Arming::disarm(method)) {
+    if (!AP_Arming::disarm(method, do_disarm_checks)) {
         return false;
     }
 
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-    gcs().send_text(MAV_SEVERITY_INFO, "Disarming motors");
+    send_arm_disarm_statustext("Disarming motors");
 #endif
 
-    AP_AHRS_NavEKF &ahrs = AP::ahrs_navekf();
+    auto &ahrs = AP::ahrs();
 
     // save compass offsets learned by the EKF if enabled
     if (ahrs.use_compass() && AP::compass().get_learn_type() == Compass::LEARN_EKF) {
@@ -188,10 +186,10 @@ bool AP_Arming_Sub::disarm(const AP_Arming::Method method)
     // reset the mission
     sub.mission.reset();
 
+#if HAL_LOGGING_ENABLED
     AP::logger().set_vehicle_armed(false);
+#endif
 
-    // disable gps velocity based centrefugal force compensation
-    ahrs.set_correct_centrifugal(false);
     hal.util->set_soft_armed(false);
 
     // clear input holds

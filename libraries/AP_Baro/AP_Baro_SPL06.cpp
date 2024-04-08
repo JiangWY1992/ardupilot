@@ -14,7 +14,10 @@
  */
 #include "AP_Baro_SPL06.h"
 
+#if AP_BARO_SPL06_ENABLED
+
 #include <utility>
+#include <AP_Math/definitions.h>
 
 extern const AP_HAL::HAL &hal;
 
@@ -98,14 +101,23 @@ bool AP_Baro_SPL06::_init()
     }
     WITH_SEMAPHORE(_dev->get_semaphore());
 
-    _has_sample = false;
-
     _dev->set_speed(AP_HAL::Device::SPEED_HIGH);
 
     uint8_t whoami;
-    if (!_dev->read_registers(SPL06_REG_CHIP_ID, &whoami, 1)  ||
-        whoami != SPL06_CHIP_ID) {
-        // not a SPL06
+
+// Sometimes SPL06 has init problems, that's due to failure of reading using SPI for the first time. The SPL06 is a dual
+// protocol sensor(I2C and SPI), sometimes it takes one SPI operation to convert it to SPI mode after it starts up.
+    bool is_SPL06 = false;
+
+    for (uint8_t i=0; i<5; i++) {
+        if (_dev->read_registers(SPL06_REG_CHIP_ID, &whoami, 1)  &&
+            whoami == SPL06_CHIP_ID) {
+            is_SPL06=true;
+            break;
+        }
+    }
+    
+    if(!is_SPL06) {
         return false;
     }
 
@@ -167,7 +179,7 @@ int32_t AP_Baro_SPL06::raw_value_scale_factor(uint8_t oversampling)
     }
 }
 
-// acumulate a new sensor reading
+// accumulate a new sensor reading
 void AP_Baro_SPL06::_timer(void)
 {
     uint8_t buf[3];
@@ -198,12 +210,14 @@ void AP_Baro_SPL06::update(void)
 {
     WITH_SEMAPHORE(_sem);
 
-    if (!_has_sample) {
+    if (_pressure_count == 0) {
         return;
     }
 
-    _copy_to_frontend(_instance, _pressure, _temperature);
-    _has_sample = false;
+    _copy_to_frontend(_instance, _pressure_sum/_pressure_count, _temperature);
+
+    _pressure_sum = 0;
+    _pressure_count = 0;
 }
 
 // calculate temperature
@@ -232,6 +246,8 @@ void AP_Baro_SPL06::_update_pressure(int32_t press_raw)
 
     WITH_SEMAPHORE(_sem);
 
-    _pressure = press_comp;
-    _has_sample = true;
+    _pressure_sum += press_comp;
+    _pressure_count++;
 }
+
+#endif  // AP_BARO_SPL06_ENABLED

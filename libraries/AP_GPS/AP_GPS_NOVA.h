@@ -22,17 +22,16 @@
 #include "AP_GPS.h"
 #include "GPS_Backend.h"
 
+#if AP_GPS_NOVA_ENABLED
 class AP_GPS_NOVA : public AP_GPS_Backend
 {
 public:
-    AP_GPS_NOVA(AP_GPS &_gps, AP_GPS::GPS_State &_state, AP_HAL::UARTDriver *_port);
+    AP_GPS_NOVA(AP_GPS &_gps, AP_GPS::Params &_params, AP_GPS::GPS_State &_state, AP_HAL::UARTDriver *_port);
 
     AP_GPS::GPS_Status highest_supported_status(void) override { return AP_GPS::GPS_OK_FIX_3D_RTK_FIXED; }
 
     // Methods
     bool read() override;
-
-    void inject_data(const uint8_t *data, uint16_t len) override;
 
     const char *name() const override { return "NOVA"; }
 
@@ -56,10 +55,9 @@ private:
     
     uint8_t _init_blob_index = 0;
     uint32_t _init_blob_time = 0;
-    static const char* const _initialisation_blob[6];
+    static const char* const _initialisation_blob[4];
    
     uint32_t crc_error_counter = 0;
-    uint32_t last_injected_data_ms = 0;
 
     struct PACKED nova_header
     {
@@ -178,3 +176,4 @@ private:
         uint16_t read;
     } nova_msg;
 };
+#endif

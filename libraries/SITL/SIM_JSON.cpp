@@ -18,6 +18,8 @@
 
 #include "SIM_JSON.h"
 
+#if HAL_SIM_JSON_ENABLED
+
 #include <stdio.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -25,6 +27,7 @@
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Logger/AP_Logger.h>
 #include <AP_HAL/utility/replace.h>
+#include <SRV_Channel/SRV_Channel.h>
 
 #define UDP_TIMEOUT_MS 100
 
@@ -98,20 +101,34 @@ void JSON::set_interface_ports(const char* address, const int port_in, const int
 */
 void JSON::output_servos(const struct sitl_input &input)
 {
-    servo_packet pkt;
-    pkt.frame_rate = rate_hz;
-    pkt.frame_count = frame_counter;
-    for (uint8_t i=0; i<16; i++) {
-        pkt.pwm[i] = input.servos[i];
+    size_t pkt_size = 0;
+    ssize_t send_ret = -1;
+    if (SRV_Channels::have_32_channels()) {
+      servo_packet_32 pkt;
+      pkt.frame_rate = rate_hz;
+      pkt.frame_count = frame_counter;
+      for (uint8_t i=0; i<32; i++) {
+          pkt.pwm[i] = input.servos[i];
+      }
+      pkt_size = sizeof(pkt);
+      send_ret = sock.sendto(&pkt, pkt_size, target_ip, control_port);
+    } else {
+      servo_packet_16 pkt;
+      pkt.frame_rate = rate_hz;
+      pkt.frame_count = frame_counter;
+      for (uint8_t i=0; i<16; i++) {
+          pkt.pwm[i] = input.servos[i];
+      }
+      pkt_size = sizeof(pkt);
+      send_ret = sock.sendto(&pkt, pkt_size, target_ip, control_port);
     }
 
-    size_t send_ret = sock.sendto(&pkt, sizeof(pkt), target_ip, control_port);
-    if (send_ret != sizeof(pkt)) {
+    if ((size_t)send_ret != pkt_size) {
         if (send_ret <= 0) {
             printf("Unable to send servo output to %s:%u - Error: %s, Return value: %ld\n",
                    target_ip, control_port, strerror(errno), (long)send_ret);
         } else {
-            printf("Sent %ld bytes instead of %lu bytes\n", (long)send_ret, (unsigned long)sizeof(pkt));
+            printf("Sent %ld bytes instead of %lu bytes\n", (long)send_ret, (unsigned long)pkt_size);
         }
     }
 }
@@ -124,9 +141,9 @@ void JSON::output_servos(const struct sitl_input &input)
     This parser does not do any syntax checking, and is not at all
     general purpose
 */
-uint8_t JSON::parse_sensors(const char *json)
+uint32_t JSON::parse_sensors(const char *json)
 {
-    uint8_t received_bitmask = 0;
+    uint32_t received_bitmask = 0;
 
     //printf("%s\n", json);
     for (uint16_t i=0; i<ARRAY_SIZE(keytable); i++) {
@@ -136,7 +153,10 @@ uint8_t JSON::parse_sensors(const char *json)
         const char *p = strstr(json, key.section);
         if (!p) {
             // we don't have this sensor
-            printf("Failed to find %s\n", key.section);
+            if (key.required) {
+                printf("Failed to find %s\n", key.section);
+                return 0;
+            }
             continue;
         }
         p += strlen(key.section)+1;
@@ -147,9 +167,8 @@ uint8_t JSON::parse_sensors(const char *json)
             if (key.required) {
                 printf("Failed to find key %s/%s\n", key.section, key.key);
                 return 0;
-            } else {
-                continue;
             }
+            continue;
         }
 
         // record the keys that are found
@@ -182,6 +201,16 @@ uint8_t JSON::parse_sensors(const char *json)
                 break;
             }
 
+            case DATA_VECTOR3D: {
+                Vector3d *v = (Vector3d *)key.ptr;
+                if (sscanf(p, "[%lf, %lf, %lf]", &v->x, &v->y, &v->z) != 3) {
+                    printf("Failed to parse Vector3f for %s/%s\n", key.section, key.key);
+                    return received_bitmask;
+                }
+                //printf("%s/%s = %f, %f, %f\n", key.section, key.key, v->x, v->y, v->z);
+                break;
+            }
+
             case QUATERNION: {
                 Quaternion *v = static_cast<Quaternion*>(key.ptr);
                 if (sscanf(p, "[%f, %f, %f, %f]", &(v->q1), &(v->q2), &(v->q3), &(v->q4)) != 4) {
@@ -190,6 +219,11 @@ uint8_t JSON::parse_sensors(const char *json)
                 }
                 break;
             }
+
+            case BOOLEAN:
+                *((bool *)key.ptr) = strtoull(p, nullptr, 10) != 0;
+                //printf("%s/%s = %i\n", key.section, key.key, *((unit8_t *)key.ptr));
+                break;
 
         }
     }
@@ -234,9 +268,10 @@ void JSON::recv_fdm(const struct sitl_input &input)
         return;
     }
 
-    const uint8_t received_bitmask = parse_sensors((const char *)(p1+1));
+    const uint32_t received_bitmask = parse_sensors((const char *)(p1+1));
     if (received_bitmask == 0) {
-        // did not receve one of the required fields
+        // did not receive one of the mandatory fields
+        printf("Did not contain all mandatory fields\n");
         return;
     }
 
@@ -246,6 +281,24 @@ void JSON::recv_fdm(const struct sitl_input &input)
         return;
     }
 
+    if (received_bitmask != last_received_bitmask) {
+        // some change in the message we have received, print what we got
+        printf("\nJSON received:\n");
+        for (uint16_t i=0; i<ARRAY_SIZE(keytable); i++) {
+            struct keytable &key = keytable[i];
+            if ((received_bitmask &  1U << i) == 0) {
+                continue;
+            }
+            if (strcmp(key.section, "") == 0) {
+                printf("\t%s\n",key.key);
+            } else {
+                printf("\t%s: %s\n",key.section,key.key);
+            }
+        }
+        printf("\n");
+    }
+    last_received_bitmask = received_bitmask;
+
     memmove(sensor_buffer, p2, sensor_buffer_len - (p2 - sensor_buffer));
     sensor_buffer_len = sensor_buffer_len - (p2 - sensor_buffer);
 
@@ -253,6 +306,8 @@ void JSON::recv_fdm(const struct sitl_input &input)
     gyro = state.imu.gyro;
     velocity_ef = state.velocity;
     position = state.position;
+    position.xy() += origin.get_distance_NE_double(home);
+    use_time_sync = !state.no_time_sync;
 
     // deal with euler or quaternion attitude
     if ((received_bitmask & QUAT_ATT) != 0) {
@@ -262,23 +317,47 @@ void JSON::recv_fdm(const struct sitl_input &input)
         dcm.from_euler(state.attitude[0], state.attitude[1], state.attitude[2]);
     }
 
-    // velocity relative to airmass in body frame
-    velocity_air_bf = dcm.transposed() * velocity_ef;
+    if ((received_bitmask & AIRSPEED)) {
+        // received airspeed directly
+        airspeed = state.airspeed;
 
-    // airspeed
-    airspeed = velocity_air_bf.length();
+        airspeed_pitot = state.airspeed;
+    } else {
+        // velocity relative to airmass in body frame
+        velocity_air_bf = dcm.transposed() * velocity_ef;
 
-    // airspeed as seen by a fwd pitot tube (limited to 120m/s)
-    airspeed_pitot = constrain_float(velocity_air_bf * Vector3f(1.0f, 0.0f, 0.0f), 0.0f, 120.0f);
+        // airspeed
+        airspeed = velocity_air_bf.length();
+
+        // airspeed as seen by a fwd pitot tube (limited to 120m/s)
+        airspeed_pitot = constrain_float(velocity_air_bf * Vector3f(1.0f, 0.0f, 0.0f), 0.0f, 120.0f);
+    }
 
     // Convert from a meters from origin physics to a lat long alt
     update_position();
 
+    // update range finder distances
+    for (uint8_t i=7; i<13; i++) {
+        if ((received_bitmask &  1U << i) == 0) {
+            continue;
+        }
+        rangefinder_m[i-7] = state.rng[i-7];
+    }
+
+    // update wind vane
+    if ((received_bitmask & WIND_DIR) != 0) {
+        wind_vane_apparent.direction = state.wind_vane_apparent.direction;
+    }
+    if ((received_bitmask & WIND_SPD) != 0) {
+        wind_vane_apparent.speed = state.wind_vane_apparent.speed;
+    }
+
     double deltat;
     if (state.timestamp_s < last_timestamp_s) {
-        // Physics time has gone backwards, don't reset AP, assume an average size timestep
+        // Physics time has gone backwards, don't reset AP
         printf("Detected physics reset\n");
         deltat = 0;
+        last_received_bitmask = 0;
     } else {
         deltat = state.timestamp_s - last_timestamp_s;
     }
@@ -286,8 +365,9 @@ void JSON::recv_fdm(const struct sitl_input &input)
 
     if (is_positive(deltat) && deltat < 0.1) {
         // time in us to hz
-        adjust_frame_time(1.0 / deltat);
-
+        if (use_time_sync) {
+            adjust_frame_time(1.0 / deltat);
+        }
         // match actual frame rate with desired speedup
         time_advance();
     }
@@ -315,7 +395,7 @@ void JSON::recv_fdm(const struct sitl_input &input)
 // @Field: GX: Simulated gyroscope, X-axis (rad/sec)
 // @Field: GY: Simulated gyroscope, Y-axis (rad/sec)
 // @Field: GZ: Simulated gyroscope, Z-axis (rad/sec)
-    AP::logger().Write("JSN1", "TimeUS,TStamp,R,P,Y,GX,GY,GZ",
+    AP::logger().WriteStreaming("JSN1", "TimeUS,TStamp,R,P,Y,GX,GY,GZ",
                        "ssrrrEEE",
                        "F???????",
                        "Qfffffff",
@@ -342,7 +422,7 @@ void JSON::recv_fdm(const struct sitl_input &input)
 // @Field: AN: simulation's acceleration, North (m/s^2)
 // @Field: AE: simulation's acceleration, East (m/s^2)
 // @Field: AD: simulation's acceleration, Down (m/s^2)
-    AP::logger().Write("JSN2", "TimeUS,VN,VE,VD,AX,AY,AZ,AN,AE,AD",
+    AP::logger().WriteStreaming("JSN2", "TimeUS,VN,VE,VD,AX,AY,AZ,AN,AE,AD",
                        "snnnoooooo",
                        "F?????????",
                        "Qfffffffff",
@@ -381,7 +461,9 @@ void JSON::update(const struct sitl_input &input)
 #if 0
     // report frame rate
     if (frame_counter % 1000 == 0) {
-        printf("FPS %.2f\n", achieved_rate_hz); // this is instantaneous rather than any clever average
+        printf("FPS %.2f\n", rate_hz); // this is instantaneous rather than any clever average
     }
 #endif
 }
+
+#endif  // HAL_SIM_JSON_ENABLED

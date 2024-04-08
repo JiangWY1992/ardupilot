@@ -21,20 +21,19 @@ void RC_Channel_Rover::mode_switch_changed(modeswitch_pos_t new_pos)
         // should not have been called
         return;
     }
-    Mode *new_mode = rover.mode_from_mode_num((Mode::Number)rover.modes[new_pos].get());
-    if (new_mode != nullptr) {
-        rover.set_mode(*new_mode, ModeReason::RC_COMMAND);
-    }
+
+    rover.set_mode((Mode::Number)rover.modes[new_pos].get(), ModeReason::RC_COMMAND);
 }
 
 // init_aux_switch_function - initialize aux functions
-void RC_Channel_Rover::init_aux_function(const aux_func_t ch_option, const AuxSwitchPos ch_flag)
+void RC_Channel_Rover::init_aux_function(const AUX_FUNC ch_option, const AuxSwitchPos ch_flag)
 {
     // init channel options
     switch (ch_option) {
     // the following functions do not need initialising:
     case AUX_FUNC::ACRO:
     case AUX_FUNC::AUTO:
+    case AUX_FUNC::CIRCLE:
     case AUX_FUNC::FOLLOW:
     case AUX_FUNC::GUIDED:
     case AUX_FUNC::HOLD:
@@ -42,13 +41,17 @@ void RC_Channel_Rover::init_aux_function(const aux_func_t ch_option, const AuxSw
     case AUX_FUNC::LOITER:
     case AUX_FUNC::MAINSAIL:
     case AUX_FUNC::MANUAL:
+    case AUX_FUNC::PITCH:
+    case AUX_FUNC::ROLL:
+    case AUX_FUNC::WALKING_HEIGHT:
     case AUX_FUNC::RTL:
     case AUX_FUNC::SAILBOAT_TACK:
-    case AUX_FUNC::SAVE_TRIM:
+    case AUX_FUNC::TRIM_TO_CURRENT_SERVO_RC:
     case AUX_FUNC::SAVE_WP:
     case AUX_FUNC::SIMPLE:
     case AUX_FUNC::SMART_RTL:
     case AUX_FUNC::STEERING:
+    case AUX_FUNC::WIND_VANE_DIR_OFSSET:
         break;
     case AUX_FUNC::SAILBOAT_MOTOR_3POS:
         do_aux_function_sailboat_motor_3pos(ch_flag);
@@ -60,9 +63,14 @@ void RC_Channel_Rover::init_aux_function(const aux_func_t ch_option, const AuxSw
 }
 
 
+bool RC_Channels_Rover::in_rc_failsafe() const
+{
+    return rover.failsafe.bits & FAILSAFE_EVENT_THROTTLE;
+}
+
 bool RC_Channels_Rover::has_valid_input() const
 {
-    if (rover.failsafe.bits & FAILSAFE_EVENT_THROTTLE) {
+    if (in_rc_failsafe()) {
         return false;
     }
     return true;
@@ -122,7 +130,7 @@ void RC_Channel_Rover::do_aux_function_sailboat_motor_3pos(const AuxSwitchPos ch
     }
 }
 
-void RC_Channel_Rover::do_aux_function(const aux_func_t ch_option, const AuxSwitchPos ch_flag)
+bool RC_Channel_Rover::do_aux_function(const AUX_FUNC ch_option, const AuxSwitchPos ch_flag)
 {
     switch (ch_option) {
     case AUX_FUNC::DO_NOTHING:
@@ -131,16 +139,17 @@ void RC_Channel_Rover::do_aux_function(const aux_func_t ch_option, const AuxSwit
         if (ch_flag == AuxSwitchPos::HIGH) {
             // do nothing if in AUTO mode
             if (rover.control_mode == &rover.mode_auto) {
-                return;
+                break;
             }
 
             // if disarmed clear mission and set home to current location
             if (!rover.arming.is_armed()) {
                 rover.mode_auto.mission.clear();
+                gcs().send_text(MAV_SEVERITY_NOTICE, "SaveWP: Mission cleared!");
                 if (!rover.set_home_to_current_location(false)) {
                     // ignored
                 }
-                return;
+                break;
             }
 
             // record the waypoint if not in auto mode
@@ -206,14 +215,20 @@ void RC_Channel_Rover::do_aux_function(const aux_func_t ch_option, const AuxSwit
         do_aux_function_change_mode(rover.mode_loiter, ch_flag);
         break;
 
+#if MODE_FOLLOW_ENABLED == ENABLED
     // Set mode to Follow
     case AUX_FUNC::FOLLOW:
         do_aux_function_change_mode(rover.mode_follow, ch_flag);
         break;
+#endif
 
     // set mode to Simple
     case AUX_FUNC::SIMPLE:
         do_aux_function_change_mode(rover.mode_simple, ch_flag);
+        break;
+
+    case AUX_FUNC::CIRCLE:
+        do_aux_function_change_mode(rover.g2.mode_circle, ch_flag);
         break;
 
     // trigger sailboat tack
@@ -227,12 +242,8 @@ void RC_Channel_Rover::do_aux_function(const aux_func_t ch_option, const AuxSwit
         do_aux_function_sailboat_motor_3pos(ch_flag);
         break;
 
-    // mainsail input, nothing to do
-    case AUX_FUNC::MAINSAIL:
-        break;
-
     // save steering trim
-    case AUX_FUNC::SAVE_TRIM:
+    case AUX_FUNC::TRIM_TO_CURRENT_SERVO_RC:
         if (!rover.g2.motors.have_skid_steering() && rover.arming.is_armed() &&
             (rover.control_mode != &rover.mode_loiter)
             && (rover.control_mode != &rover.mode_hold) && ch_flag == AuxSwitchPos::HIGH) {
@@ -241,9 +252,18 @@ void RC_Channel_Rover::do_aux_function(const aux_func_t ch_option, const AuxSwit
         }
         break;
 
-    default:
-        RC_Channel::do_aux_function(ch_option, ch_flag);
+    // manual input, nothing to do
+    case AUX_FUNC::MAINSAIL:
+    case AUX_FUNC::PITCH:
+    case AUX_FUNC::ROLL:
+    case AUX_FUNC::WALKING_HEIGHT:
+    case AUX_FUNC::WIND_VANE_DIR_OFSSET:
         break;
 
+    default:
+        return RC_Channel::do_aux_function(ch_option, ch_flag);
+
     }
+
+    return true;
 }

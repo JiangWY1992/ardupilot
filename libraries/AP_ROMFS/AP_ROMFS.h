@@ -3,7 +3,7 @@
  */
 #pragma once
 
-#include <AP_HAL/AP_HAL.h>
+#include <stdint.h>
 
 class AP_ROMFS {
 public:
@@ -16,6 +16,9 @@ public:
     // free returned data
     static void free(const uint8_t *data);
 
+    // get the size of a file without decompressing
+    static bool find_size(const char *name, uint32_t &size);
+
     /*
       directory listing interface. Start with ofs=0. Returns pathnames
       that match dirname prefix. Ends with nullptr return when no more
@@ -24,13 +27,16 @@ public:
     static const char *dir_list(const char *dirname, uint16_t &ofs);
 
 private:
-    // find an embedded file
-    static const uint8_t *find_file(const char *name, uint32_t &size);
-
     struct embedded_file {
         const char *filename;
-        uint32_t size;
+        uint32_t compressed_size;
+        uint32_t decompressed_size;
+        uint32_t crc;
         const uint8_t *contents;
     };
+
+    // find an embedded file
+    static const AP_ROMFS::embedded_file *find_file(const char *name);
+
     static const struct embedded_file files[];
 };

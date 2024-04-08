@@ -1,15 +1,15 @@
 #include "AP_Compass_SITL.h"
 
+#if AP_COMPASS_SITL_ENABLED
+
 #include <AP_HAL/AP_HAL.h>
 
-#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
 extern const AP_HAL::HAL& hal;
 
 AP_Compass_SITL::AP_Compass_SITL()
     : _sitl(AP::sitl())
 {
     if (_sitl != nullptr) {
-        _compass._setup_earth_field();
         for (uint8_t i=0; i<MAX_CONNECTED_MAGS; i++) {
             uint32_t dev_id = _sitl->mag_devid[i];
             if (dev_id == 0) {
@@ -22,8 +22,10 @@ AP_Compass_SITL::AP_Compass_SITL()
                 _compass_instance[_num_compass] = instance;
                 set_dev_id(_compass_instance[_num_compass], dev_id);
 
-                // save so the compass always comes up configured in SITL
-                save_dev_id(_compass_instance[_num_compass]);
+                if (_sitl->mag_save_ids) {
+                    // save so the compass always comes up configured in SITL
+                    save_dev_id(_compass_instance[_num_compass]);
+                }
                 set_rotation(instance, ROTATION_NONE);
                 _num_compass++;
             }
@@ -35,7 +37,13 @@ AP_Compass_SITL::AP_Compass_SITL()
                 _compass.set_offsets(i, _sitl->mag_ofs[i]);
             }
         }
-        
+
+        // we want to simulate a calibrated compass by default, so set
+        // scale to 1
+        AP_Param::set_default_by_name("COMPASS_SCALE", 1);
+        AP_Param::set_default_by_name("COMPASS_SCALE2", 1);
+        AP_Param::set_default_by_name("COMPASS_SCALE3", 1);
+
         // make first compass external
         set_external(_compass_instance[0], true);
 
@@ -45,7 +53,7 @@ AP_Compass_SITL::AP_Compass_SITL()
 
 
 /*
-  create correction matrix for diagnonals and off-diagonals
+  create correction matrix for diagonals and off-diagonals
 */
 void AP_Compass_SITL::_setup_eliptical_correcion(uint8_t i)
 {
@@ -122,18 +130,23 @@ void AP_Compass_SITL::_timer()
         Vector3f f = (_eliptical_corr * new_mag_data) - _sitl->mag_ofs[i].get();
         // rotate compass
         f.rotate_inverse((enum Rotation)_sitl->mag_orient[i].get());
-        // and add in AHRS_ORIENTATION setting if not an external compass
-        if (get_board_orientation() == ROTATION_CUSTOM) {
-            f = _sitl->ahrs_rotation * f;
-        } else {
-            f.rotate(get_board_orientation());
+        f.rotate(get_board_orientation());
+        // scale the compass to simulate sensor scale factor errors
+        f *= _sitl->mag_scaling[i];
+
+        switch (_sitl->mag_fail[i]) {
+        case 0:
+            accumulate_sample(f, _compass_instance[i], 10);
+            _last_data[i] = f;
+            break;
+        case 1:
+            // no data
+            break;
+        case 2:
+            // frozen compass
+            accumulate_sample(_last_data[i], _compass_instance[i], 10);
+            break;
         }
-        if (i == 0) {
-            // scale the first compass to simulate sensor scale factor errors
-            f *= _sitl->mag_scaling;
-        }
-        
-        accumulate_sample(f, _compass_instance[i], 10);
     }
 }
 
@@ -143,4 +156,4 @@ void AP_Compass_SITL::read()
         drain_accumulated_samples(_compass_instance[i], nullptr);
     }
 }
-#endif
+#endif  // AP_COMPASS_SITL_ENABLED
